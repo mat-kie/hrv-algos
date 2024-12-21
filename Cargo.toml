@@ -4,4 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+anyhow = "1.0.94"
+lstsq = "0.6.0"
 nalgebra = { version = "0.33.2", features = ["serde", "serde-serialize"] }

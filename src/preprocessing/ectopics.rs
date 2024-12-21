@@ -1,1 +1,0 @@
-//! Ectopic beat removal algorithms.

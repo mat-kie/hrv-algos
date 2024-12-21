@@ -1,1 +1,1 @@
-pub mod ectopics;
+pub mod outliers;
