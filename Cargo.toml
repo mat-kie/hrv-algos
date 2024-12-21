@@ -2,6 +2,13 @@
 name = "hrv-algos"
 version = "0.1.0"
 edition = "2021"
+description = "A collection of algorithms for heart rate variability analysis."
+authors = ["Mattis Kieffer <crates-io@mk-io.de>"]
+license = "MIT"
+repository = "https://github.com/mat-kie/hrv-algos"
+readme = "README.md"
+keywords = ["heart rate variability", "HRV", "heartrate", "rmssd", "dfa" , "algorithms", "rust"]
+
 
 [dependencies]
 anyhow = "1.0.94"
