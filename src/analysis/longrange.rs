@@ -53,6 +53,8 @@ pub struct DFAnalysis {
     pub alpha: f64,
     pub intercept: f64,
     pub r_squared: f64,
+    pub log_n: Vec<f64>,
+    pub log_f: Vec<f64>,
 }
 
 impl DFAnalysis {
@@ -97,8 +99,9 @@ impl DFAnalysis {
                         match detrender.detrend(slice) {
                             Ok(data) => {
                                 let detrended = DVector::from(data);
-                                let sum_sq: f64 = detrended.dot(&detrended);
-                                Some(Ok(sum_sq / (window - 1) as f64))
+                                let var = detrended.variance();
+                                let _emp_var2: f64 = detrended.dot(&detrended) / ((window - 1) as f64);
+                                Some(Ok(var))//Ok(sum_sq / (window - 1) as f64))
                             }
                             Err(e) => Some(Err(e)),
                         }
@@ -123,6 +126,8 @@ impl DFAnalysis {
             alpha,
             intercept,
             r_squared,
+            log_n,
+            log_f,
         })
     }
 }
