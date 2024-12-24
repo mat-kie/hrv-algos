@@ -7,13 +7,18 @@ use anyhow::Result;
 use nalgebra::DMatrix;
 use nalgebra::DVector;
 use nalgebra::DVectorView;
+use rayon::iter::IndexedParallelIterator;
+use rayon::iter::IntoParallelRefIterator;
+use rayon::iter::ParallelIterator;
+use rayon::slice::ParallelSlice;
+use rayon::slice::Windows;
 
 pub trait DetrendAlgorithm {
     fn detrend(&self, data: &[f64]) -> Result<Vec<f64>>;
 }
 pub enum DetrendStrategy {
     Linear,
-    Custom(Box<dyn DetrendAlgorithm>),
+    Custom(Box<dyn DetrendAlgorithm + Sync + Send>),
 }
 
 impl DetrendAlgorithm for DetrendStrategy {
@@ -54,21 +59,22 @@ pub struct DFAnalysis {
 }
 
 impl DFAnalysis {
-    pub fn new(
-        data: &[f64],
-        min_window: usize,
-        max_window: usize,
-        window_count: usize,
-        detrender: DetrendStrategy,
-    ) -> Result<Self> {
-        if data.len() < 64 {
-            return Err(anyhow!("Data length must be at least 64 points"));
+    pub fn new(data: &[f64], windows: &[usize], detrender: DetrendStrategy) -> Result<Self> {
+        if windows.is_empty() {
+            return Err(anyhow!("Windows must not be empty"));
         }
-        if min_window < 4 {
+        let windows = {
+            let mut _w = windows.to_owned();
+            _w.sort();
+            _w
+        };
+        if data.len() < 4 * *windows.last().unwrap() {
+            return Err(anyhow!(
+                "Data length must be at least 4x the size of the largest window"
+            ));
+        }
+        if *windows.first().unwrap() < 4 {
             return Err(anyhow!("Minimum window size must be at least 4"));
-        }
-        if max_window >= data.len() / 4 {
-            return Err(anyhow!("Maximum window size too large"));
         }
         let data = DVectorView::from(data);
         let mean = data.mean();
@@ -80,21 +86,29 @@ impl DFAnalysis {
             })
             .collect();
 
-        // Generate window sizes (log space)
-        let windows = logspace_windows(min_window, max_window, window_count);
-
         // Calculate fluctuations for each window size
         let mut log_n: Vec<f64> = Vec::with_capacity(windows.len());
         let mut log_f: Vec<f64> = Vec::with_capacity(windows.len());
 
         for window in windows {
             let (fluctuation, n_segments) = integrated
-                .chunks(window)
-                .map(|slice| {
-                    let detrended = DVector::from(detrender.detrend(slice).unwrap());
-                    let sum_sq = detrended.dot(&detrended);
-                    sum_sq / window as f64
+                .par_chunks(window)
+                .filter_map(|slice| -> Option<Result<f64>> {
+                    if slice.len() != window {
+                        None
+                    } else {
+                        match detrender.detrend(slice) {
+                            Ok(data) => {
+                                let detrended = DVector::from(data);
+                                let sum_sq: f64 = detrended.dot(&detrended);
+                                Some(Ok(sum_sq / (window - 1) as f64))
+                            }
+                            Err(e) => return Some(Err(e)),
+                        }
+                    }
                 })
+                .collect::<Result<Vec<f64>, _>>()?
+                .iter()
                 .fold((0f64, 0usize), |(fluctuation, n_segments), f| {
                     (fluctuation + f, n_segments + 1)
                 });
@@ -116,18 +130,6 @@ impl DFAnalysis {
     }
 }
 
-fn logspace_windows(min_window: usize, max_window: usize, window_count: usize) -> Vec<usize> {
-    (0..window_count)
-        .map(|i| {
-            let log_min = (min_window as f64).ln();
-            let log_max = (max_window as f64).ln();
-            let log_step = (log_max - log_min) / (window_count - 1) as f64;
-            (((log_min + i as f64 * log_step).exp()).round() as usize)
-                .max(min_window)
-                .min(max_window)
-        })
-        .collect()
-}
 
 fn linear_fit(x: &[f64], y: &[f64]) -> Result<((f64, f64), f64)> {
     if x.len() < 2 {
