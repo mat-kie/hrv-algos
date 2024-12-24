@@ -7,11 +7,8 @@ use anyhow::Result;
 use nalgebra::DMatrix;
 use nalgebra::DVector;
 use nalgebra::DVectorView;
-use rayon::iter::IndexedParallelIterator;
-use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
-use rayon::slice::Windows;
 
 pub trait DetrendAlgorithm {
     fn detrend(&self, data: &[f64]) -> Result<Vec<f64>>;
@@ -103,7 +100,7 @@ impl DFAnalysis {
                                 let sum_sq: f64 = detrended.dot(&detrended);
                                 Some(Ok(sum_sq / (window - 1) as f64))
                             }
-                            Err(e) => return Some(Err(e)),
+                            Err(e) => Some(Err(e)),
                         }
                     }
                 })
@@ -129,7 +126,6 @@ impl DFAnalysis {
         })
     }
 }
-
 
 fn linear_fit(x: &[f64], y: &[f64]) -> Result<((f64, f64), f64)> {
     if x.len() < 2 {
