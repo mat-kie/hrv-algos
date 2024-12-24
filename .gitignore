@@ -24,3 +24,5 @@ Cargo.lock
 
 /target
 *.pdf
+tests/analysis/
+tests/**/*.ipynb
