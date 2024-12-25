@@ -7,7 +7,7 @@ authors = ["Mattis Kieffer <crates-io@mk-io.de>"]
 license = "MIT"
 repository = "https://github.com/mat-kie/hrv-algos"
 readme = "README.md"
-keywords = ["heart rate variability", "HRV", "heartrate", "rmssd", "dfa" , "algorithms", "rust"]
+keywords = ["hrv", "heartrate", "dfa" , "algorithms", "rmssd"]
 
 
 [dependencies]
