@@ -269,11 +269,8 @@ pub fn rr_artefacts(
 
 #[cfg(test)]
 mod tests {
-    use core::f64;
-
-    use rayon::vec;
-
     use super::*;
+    use core::f64;
 
     #[test]
     fn test_symmetric_limits_acceptable() {
@@ -327,10 +324,11 @@ mod tests {
         );
     }
 
-
     #[test]
     fn test_rr_outliers() {
-        let signal = vec![1000.0, 1100.0, 1.150e3, 1.50e3, 0.5e3, 1.12e3, 1.15e3, 1.16e3, 1.07e3, 1.08e3, 1.09e3];
+        let signal = vec![
+            1000.0, 1100.0, 1.150e3, 1.50e3, 0.5e3, 1.12e3, 1.15e3, 1.16e3, 1.07e3, 1.08e3, 1.09e3,
+        ];
         let result = rr_artefacts(&signal, None, None, None).unwrap();
         assert_eq!(
             result,
@@ -349,7 +347,6 @@ mod tests {
             ]
         );
     }
-
 
     #[test]
     fn test_value_ratio_acceptable() {
