@@ -139,6 +139,22 @@ pub fn moving_window_filter(
         .collect()
 }
 
+/// Computes a rolling quantile over a 1D time series.
+///
+/// # Arguments
+///
+/// * `signal` - Slice of input data to process.
+/// * `window_size` - Size of the rolling window. Considers both sides of current index.
+/// * `quantile` - Desired quantile in [0.0, 1.0].
+///
+/// # Returns
+///
+/// A vector where each element is the quantile value in the local window around that index.
+/// Returns an error if `quantile` is not in the range 0.0..=1.0.
+///
+/// # Errors
+///
+/// If `quantile` is not between 0.0 and 1.0, returns an error.
 fn rolling_quantile(signal: &[f64], window_size: usize, quantile: f64) -> Result<Vec<f64>> {
     if !(0.0..=1.0).contains(&quantile) {
         return Err(anyhow!("Quantile must be between 0 and 1"));
@@ -161,18 +177,68 @@ fn rolling_quantile(signal: &[f64], window_size: usize, quantile: f64) -> Result
         .collect()
 }
 
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum OutlierType {
+    None,
+    Ectopic,
+    Long,
+    Short,
+    Missed,
+    Extra,
+}
+
+fn calc_rr_threshold(signal: &[f64], quantile_scale: f64) -> Result<Vec<f64>> {
+    let first_quantile = rolling_quantile(signal, 91, 0.25)?;
+    let third_quantile = rolling_quantile(signal, 91, 0.75)?;
+    let first_threshold = first_quantile
+        .par_iter()
+        .zip(third_quantile)
+        .map(|(q1, q3)| quantile_scale * (q3 - q1) / 2.0)
+        .collect();
+    Ok(first_threshold)
+}
+
+
+/// Detects artefacts (ectopic, long, short, missed, extra beats) in an RR interval series
+/// using rolling quantiles and threshold-based classification.
+///
+/// # Arguments
+///
+/// * `rr` - Slice of consecutive RR intervals (in milliseconds).
+/// * `slope` - Optional slope control parameter for threshold lines.
+/// * `intersect` - Optional intercept control parameter for threshold lines.
+/// * `quantile_scale` - Optional scaling factor for threshold calculations.
+///
+/// # Returns
+///
+/// A `Result` containing a vector of tuples `(rr_value, is_artefact)` for each RR interval.
+///
+/// # Errors
+///
+/// Returns an error if `rr` has fewer than 2 elements.
+///
+/// # Example
+///
+/// ```
+/// use hrv_algos::preprocessing::outliers::rr_artefacts;
+/// let rr = vec![800.0, 805.0, 790.0];
+/// let result = rr_artefacts(&rr, None, None, None).unwrap();
+/// for (val, is_artefact) in &result {
+///     println!("{} -> {:?}", val, is_artefact);
+/// }
+/// ```
 pub fn rr_artefacts(
     rr: &[f64],
     c1: Option<f64>,
     c2: Option<f64>,
     alpha: Option<f64>,
-) -> Result<Vec<(f64, bool)>> {
+) -> Result<Vec<(f64, OutlierType)>> {
     if rr.len() < 2 {
         return Err(anyhow!("RR intervals must have at least 2 elements"));
     }
-    let c1 = c1.unwrap_or(0.13);
-    let c2 = c2.unwrap_or(0.17);
-    let alpha = alpha.unwrap_or(5.2);
+    let slope = c1.unwrap_or(0.13);
+    let intersect = c2.unwrap_or(0.17);
+    let quantile_scale = alpha.unwrap_or(5.2);
 
     let drr = {
         let mut drr: Vec<f64> = rr.windows(2).map(|w| w[1] - w[0]).collect();
@@ -181,33 +247,30 @@ pub fn rr_artefacts(
     };
 
     // Rolling quantile calculations (q1 and q3)
-    let q1 = rolling_quantile(&drr, 91, 0.25)?;
-    let q3 = rolling_quantile(&drr, 91, 0.75)?;
-    let th1: Vec<f64> = q1
-        .par_iter()
-        .zip(&q3)
-        .map(|(&q1, &q3)| alpha * (q3 - q1) / 2.0)
-        .collect();
-
+    let first_threshold = calc_rr_threshold(&drr, quantile_scale)?;
     // Calculate median RR (mRR)
     let med_rr = rolling_quantile(rr, 11, 0.5)?;
-    let mut mrr: Vec<f64> = rr.iter().zip(&med_rr).map(|(&rr, &med)| rr - med).collect();
-    for val in &mut mrr {
-        if *val < 0.0 {
-            *val *= 2.0;
-        }
-    }
-
-    // Calculate second threshold (th2)
-    let q1_mrr = rolling_quantile(&mrr, 91, 0.25)?;
-    let q3_mrr = rolling_quantile(&mrr, 91, 0.75)?;
-    let th2: Vec<f64> = q1_mrr
-        .iter()
-        .zip(&q3_mrr)
-        .map(|(&q1, &q3)| alpha * (q3 - q1) / 2.0)
+    let med_rr_deviation: Vec<f64> = rr
+        .par_iter()
+        .zip(&med_rr)
+        .map(|(&rr, &med)| {
+            let val = rr - med;
+            if val < 0.0 {
+                val * 2.0
+            } else {
+                val
+            }
+        })
         .collect();
 
-    let normalized_mrr: Vec<f64> = mrr.iter().zip(&th2).map(|(&mrr, &th2)| mrr / th2).collect();
+    // Calculate second threshold (th2)
+    let second_threshold = calc_rr_threshold(&med_rr_deviation, quantile_scale)?;
+
+    let normalized_mrr: Vec<f64> = med_rr_deviation
+        .par_iter()
+        .zip(&second_threshold)
+        .map(|(&mrr, &th2)| mrr / th2)
+        .collect();
 
     // Decision
     let mean_rr = rr.iter().copied().sum::<f64>() / rr.len() as f64;
@@ -217,8 +280,8 @@ pub fn rr_artefacts(
         .map(|(idx, &rr_val)| {
             let drr_val = drr[idx];
             let nmrr = normalized_mrr[idx];
-            let th1_val = th1[idx];
-            let th2_val = th2[idx];
+            let th1_val = first_threshold[idx];
+            let th2_val = second_threshold[idx];
 
             let s11 = drr_val / th1_val;
 
@@ -246,21 +309,32 @@ pub fn rr_artefacts(
                 }
             };
 
-            let ectopic =
-                (s11 > 1.0 && s12 < (-c1 * s11 - c2)) || (s11 < -1.0 && s12 > (-c1 * s11 + c2));
+            let ectopic = (s11 > 1.0 && s12 < (-slope * s11 - intersect))
+                || (s11 < -1.0 && s12 > (-slope * s11 + intersect));
 
+            if ectopic {
+                return (rr_val, OutlierType::Ectopic);
+            }
             let long =
                 ((s11 > 1.0 && s22 < -1.0) || (nmrr.abs() > 3.0 && rr_val > mean_rr)) && !ectopic;
-
+            if long {
+                return (rr_val, OutlierType::Long);
+            }
             let short =
                 ((s11 < -1.0 && s22 > 1.0) || (nmrr.abs() > 3.0 && rr_val <= mean_rr)) && !ectopic;
-
+            if short {
+                return (rr_val, OutlierType::Short);
+            }
             let missed = long && ((rr_val / 2.0 - med_rr[idx]).abs() < th2_val);
-
+            if missed {
+                return (rr_val, OutlierType::Missed);
+            }
             let extra =
                 short && ((rr_val + rr.get(idx + 1).unwrap_or(&0.0) - med_rr[idx]).abs() < th2_val);
-
-            (rr_val, ectopic || long || short || missed || extra)
+            if extra {
+                return (rr_val, OutlierType::Extra);
+            }
+            (rr_val, OutlierType::None)
         })
         .collect();
 
@@ -333,17 +407,17 @@ mod tests {
         assert_eq!(
             result,
             vec![
-                (1000.0, false),
-                (1100.0, false),
-                (1.150e3, false),
-                (1.50e3, true),
-                (0.5e3, true),
-                (1.12e3, false),
-                (1.15e3, false),
-                (1.16e3, false),
-                (1.07e3, false),
-                (1.08e3, false),
-                (1.09e3, false)
+                (1000.0, OutlierType::None),
+                (1100.0, OutlierType::None),
+                (1.150e3, OutlierType::None),
+                (1.50e3, OutlierType::Long),
+                (0.5e3, OutlierType::Ectopic),
+                (1.12e3, OutlierType::None),
+                (1.15e3, OutlierType::None),
+                (1.16e3, OutlierType::None),
+                (1.07e3, OutlierType::None),
+                (1.08e3, OutlierType::None),
+                (1.09e3, OutlierType::None),
             ]
         );
     }
