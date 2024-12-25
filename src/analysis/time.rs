@@ -1,4 +1,8 @@
-//! Time domain heartrate varaibility data analysis algorithms.
+//! This module provides functions to calculate time-domain measures of heart rate variability (HRV).
+//!
+//! Currently the following metrics can be calculated:
+//! - Root Mean Square of Successive Differences (RMSSD)
+//! - Standard Deviation of RR intervals (SDRR)
 
 use anyhow::anyhow;
 use anyhow::Result;
@@ -33,6 +37,22 @@ pub fn calc_rmssd(data: &[f64]) -> Result<f64> {
     }
 }
 
+/// Calculates the Standard Deviation of RR intervals (SDRR) from a slice of RR intervals.
+///
+/// SDRR is a time-domain measure of heart rate variability, which is the standard deviation
+/// of the RR intervals.
+///
+/// # Arguments
+///
+/// * `data` - A slice of f64 values representing RR intervals.
+///
+/// # Returns
+///
+/// * `Result<f64>` - The SDRR value if the calculation is successful, otherwise an error.
+///
+/// # Errors
+///
+/// This function will return an error if the input slice contains fewer than two elements.
 pub fn calc_sdrr(data: &[f64]) -> Result<f64> {
     if data.len() < 2 {
         Err(anyhow!(

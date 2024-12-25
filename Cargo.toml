@@ -14,4 +14,5 @@ keywords = ["heart rate variability", "HRV", "heartrate", "rmssd", "dfa" , "algo
 anyhow = "1.0.94"
 lstsq = "0.6.0"
 nalgebra = { version = "0.33.2", features = ["serde", "serde-serialize"] }
+rand = "0.8.5"
 rayon = "1.10.0"

@@ -1,9 +1,28 @@
-//! Nonlinear heartrate variability analysis algorithms.
-
-use core::f64;
+//! Nonlinear analysis module for HRV algorithms.
+//!
+//! This module currently only provides functionality to calculate Poincare metrics SD1 and SD2.
+//!
+//! # Structures
+//! - `PoincareAnalysisResult`: Stores results of Poincare plot analysis, including SD1, SD2, and their eigenvectors.
+//!
+//! # Functions
+//! - `calc_poincare_metrics`: Calculates Poincare plot metrics SD1 and SD2 with their eigenvectors.
+//!
+//! # Usage
+//! To use the `calc_poincare_metrics` function, provide a slice of RR intervals in milliseconds. The function returns a `PoincareAnalysisResult` containing SD1, SD2, and their eigenvectors.
+//!
+//! # Example
+//! ```rust
+//! use hrv_algos::analysis::nonlinear::calc_poincare_metrics;
+//!
+//! let data = [1000.0, 1010.0, 1001.0, 1030.0, 1049.0];
+//! let poincare = calc_poincare_metrics(&data).unwrap();
+//! println!("SD1: {}, SD2: {}", poincare.sd1, poincare.sd2);
+//! ```
 
 use anyhow::anyhow;
 use anyhow::Result;
+use core::f64;
 use nalgebra::DMatrix;
 use nalgebra::DVectorView;
 
