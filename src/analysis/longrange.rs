@@ -7,6 +7,7 @@ use anyhow::Result;
 use nalgebra::DMatrix;
 use nalgebra::DVector;
 use nalgebra::DVectorView;
+use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
 
@@ -178,22 +179,12 @@ impl DFAnalysis {
     ///    - The log-transformed window sizes (`log_n`) and corrected fluctuations (`log_f`) are
     ///      used to perform a linear regression, yielding the scaling exponent `alpha`.
     ///
-    /// # Example
-    ///
-    /// ```rust
-    /// let data = vec![0.5, 1.2, 0.8, 1.0, 1.5, 2.1];
-    /// let windows = vec![4, 8, 16];
-    /// let detrender = MyDetrendingStrategy::new(); // Implement DetrendStrategy for this
-    ///
-    /// let analysis = UDFAnalysis::new_unbiased(&data, &windows, detrender)?;
-    /// println!("Scaling Exponent: {}", analysis.alpha);
-    /// ```
-    ///
     /// # References
     ///
     /// - Yuan, Q., Gu, C., Weng, T., Yang, H. (2018). *Unbiased detrended fluctuation analysis:
     ///   Long-range correlations in very short time series*. Physica A, 505, 179-189.
     ///
+
     pub fn new_unbiased(
         data: &[f64],
         windows: &[usize],
@@ -215,6 +206,7 @@ impl DFAnalysis {
         if *windows.first().unwrap() < 4 {
             return Err(anyhow!("Minimum window size must be at least 4"));
         }
+
         let data = DVectorView::from(data);
         let mean = data.mean();
         let integrated: Vec<f64> = data
@@ -225,43 +217,70 @@ impl DFAnalysis {
             })
             .collect();
 
-        // Calculate fluctuations for each window size
-        let mut log_n: Vec<f64> = Vec::with_capacity(windows.len());
-        let mut log_f: Vec<f64> = Vec::with_capacity(windows.len());
+        let results: Vec<_> = windows
+            .par_iter()
+            .map(|&window| -> Result<_> {
+                let n_segments = integrated.len() - window + 1;
+                if n_segments < 1 {
+                    return Ok(None);
+                }
 
-        for window in windows {
-            let (fluctuation, n_segments) = integrated
-                .par_windows(window)
-                .map(|slice| -> Result<f64> {
-                    let detrended = DVector::from(detrender.detrend(slice)?);
-                    // Compute variance with bias corrections
-                    let variance = detrended.variance();
-                    // Compute unbiased autocorrelation corrections
-                    let autocorr_shifted = detrended
-                        .as_slice()
-                        .windows(2)
-                        .map(|data| data[0] * data[1])
-                        .sum::<f64>()
-                        / (variance * (window - 1) as f64);
-                    let rho_star =
-                        autocorr_shifted + (1.0 + 3.0 * autocorr_shifted) / (2.0 * window as f64);
+                let f: f64 = integrated
+                    .as_slice()
+                    .windows(window)
+                    .map(|slice| -> Result<f64> {
+                        let detrended = DVector::from(detrender.detrend(slice)?);
 
-                    // Adjusted fluctuation
-                    let corrected_fluctuation = rho_star * variance;
-                    Ok(corrected_fluctuation)
-                })
-                .collect::<Result<Vec<f64>, _>>()?
-                .iter()
-                .fold((0f64, 0usize), |(fluctuation, n_segments), f| {
-                    (fluctuation + f, n_segments + 1)
-                });
-            if n_segments > 0 {
-                let f_n = (fluctuation / n_segments as f64).sqrt();
-                log_n.push((window as f64).ln());
-                log_f.push(f_n.ln());
-            }
-        }
-        // Linear regression on log-log data
+                        let df_sum: f64 = detrended.sum();
+                        let df_2_sum: f64 = detrended.iter().map(|&x| x * x).sum();
+                        let df_odd_sum: f64 = detrended.iter().step_by(2).sum();
+                        let df_even_sum: f64 = detrended.iter().skip(1).step_by(2).sum();
+                        let df_shift_sum: f64 =
+                            detrended.as_slice().windows(2).map(|w| w[0] * w[1]).sum();
+
+                        let df_neg_mean = (df_odd_sum - df_even_sum) / window as f64;
+                        let df_neg_var = df_2_sum / window as f64 - df_neg_mean.powi(2);
+                        let df_pos_mean = df_sum / window as f64;
+                        let df_pos_var = df_2_sum / window as f64 - df_pos_mean.powi(2);
+
+                        let df_pos_shift = (df_shift_sum
+                            + df_pos_mean
+                                * (detrended[0] + detrended[window - 1]
+                                    - df_pos_mean * (window as f64 + 1.0)))
+                            / df_pos_var;
+
+                        let df_neg_shift = (-df_shift_sum
+                            + df_neg_mean
+                                * (detrended[0]
+                                    + detrended[window - 1] * (-1.0_f64).powi(window as i32 + 1)
+                                    - df_neg_mean * (window as f64 + 1.0)))
+                            / df_neg_var;
+
+                        let rho_a = (window as f64 + df_pos_shift) / (2.0 * window as f64 - 1.0);
+                        let rho_b = (window as f64 + df_neg_shift) / (2.0 * window as f64 - 1.0);
+
+                        let rho_a_star = rho_a + (1.0 + 3.0 * rho_a) / (2.0 * window as f64);
+                        let rho_b_star = rho_b + (1.0 + 3.0 * rho_b) / (2.0 * window as f64);
+
+                        Ok((rho_a_star + rho_b_star)
+                            * (1.0 - 1.0 / (2.0 * window as f64))
+                            * df_pos_var)
+                    })
+                    .collect::<Result<Vec<f64>>>()?
+                    .iter()
+                    .sum();
+
+                let f_n =
+                    (f * ((window - 1) as f64 / window as f64).sqrt() / n_segments as f64).sqrt();
+                Ok(Some(((window as f64).ln(), f_n.ln())))
+            })
+            .collect::<Result<Vec<Option<_>>>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+
+        let (log_n, log_f): (Vec<_>, Vec<_>) = results.into_iter().unzip();
+
         let ((alpha, intercept), r_squared) = linear_fit(&log_n, &log_f)?;
 
         Ok(DFAnalysis {
