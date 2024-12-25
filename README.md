@@ -2,6 +2,8 @@
 
 [![Pipeline Status](https://github.com/mat-kie/hrv-algos/actions/workflows/rust.yml/badge.svg)](https://github.com/mat-kie/hrv-algos/actions/workflows/rust.yml)
 [![codecov](https://codecov.io/github/mat-kie/hrv-algos/graph/badge.svg?token=2VYIA5LC8M)](https://codecov.io/github/mat-kie/hrv-algos)
+[![Crates.io](https://img.shields.io/crates/v/hrv-algos.svg)](https://crates.io/crates/hrv-algos)
+
 
 Heartrate data processing and analysis algorithms implemented in Rust.
 
