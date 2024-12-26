@@ -23,13 +23,13 @@ use rand::Rng;
 /// # Examples
 ///
 /// ```
-/// use hrv_algos::preprocessing::noise::hide_quantization;
+/// use hrv_algos::preprocessing::noise::dithering;
 /// let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-/// let result = hide_quantization(&data, Some(0.1)).unwrap();
+/// let result = dithering(&data, Some(0.1)).unwrap();
 /// data.iter().zip(result.iter()).for_each(|(p, np)| {assert!((p-np).abs() <= 0.1)});
 /// ```
-pub fn hide_quantization(data: &[f64], noise_scale: Option<f64>) -> Result<Vec<f64>> {
-    let scale = noise_scale.unwrap_or(1.0);
+pub fn dithering(data: &[f64], quantization: Option<f64>) -> Result<Vec<f64>> {
+    let scale = quantization.unwrap_or(1.0);
     if scale < 0.0 {
         return Err(anyhow!("Noise scale must be positive"));
     }
@@ -46,7 +46,7 @@ mod tests {
     #[test]
     fn test_hide_quantization_with_default_scale() {
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let result = hide_quantization(&data, None).unwrap();
+        let result = dithering(&data, None).unwrap();
         assert_eq!(result.len(), data.len());
         for (p, np) in data.iter().zip(result.iter()) {
             assert!((p - np).abs() <= 1.0);
@@ -56,7 +56,7 @@ mod tests {
     #[test]
     fn test_hide_quantization_with_custom_scale() {
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let result = hide_quantization(&data, Some(0.1)).unwrap();
+        let result = dithering(&data, Some(0.1)).unwrap();
         assert_eq!(result.len(), data.len());
         for (p, np) in data.iter().zip(result.iter()) {
             assert!((p - np).abs() <= 0.1);
@@ -66,7 +66,7 @@ mod tests {
     #[test]
     fn test_hide_quantization_no_data() {
         let data: Vec<f64> = vec![];
-        let result = hide_quantization(&data, None).unwrap();
+        let result = dithering(&data, None).unwrap();
         assert!(result.is_empty());
     }
 
@@ -74,7 +74,7 @@ mod tests {
     fn test_hide_quantization_with_negative_scale() {
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let scale = -1.0;
-        let result = hide_quantization(&data, Some(scale));
+        let result = dithering(&data, Some(scale));
         assert!(result.is_err());
     }
 }
