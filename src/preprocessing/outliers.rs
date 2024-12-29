@@ -31,6 +31,9 @@ pub trait Interpolator {
 /// Enum representing different types of outliers.
 ///
 /// Outliers can be classified as ectopic, long, short, missed, or extra beats.
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum OutlierType {
     /// No outlier detected
