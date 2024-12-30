@@ -17,3 +17,6 @@ nalgebra = { version = "0.33.2", features = ["serde", "serde-serialize"] }
 rand = "0.8.5"
 rayon = "1.10.0"
 serde = { version = "1.0.130", features = ["derive"] , optional = true }
+
+[dev-dependencies]
+mockall = "0.7.0"

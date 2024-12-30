@@ -762,7 +762,6 @@ mod tests {
         let criterion = ValueRatioCriterion { ratio: 0.2 };
         let mut filter = MovingWindowFilter::new(Box::new(criterion), 5);
         assert!(filter.add_data(&signal).is_err());
-        
     }
     #[test]
     fn test_linear_interpolation() {

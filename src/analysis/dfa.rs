@@ -62,6 +62,7 @@ use rayon::slice::ParallelSlice;
 ///     }
 /// }
 /// ```
+#[cfg_attr(test, mockall::automock)]
 pub trait DetrendAlgorithm {
     /// Removes trends from the provided data and returns the detrended data.
     ///
@@ -466,7 +467,61 @@ fn linear_fit(x: &[f64], y: &[f64]) -> Result<((f64, f64), f64)> {
 
 #[cfg(test)]
 mod tests {
+    use rand::{Rng, SeedableRng};
+
     use super::*;
+
+    fn get_test_data(size: usize) -> Vec<f64> {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        (0..size)
+            .map(|_| 1000.0 + rng.gen_range(-10.0..10.0))
+            .collect()
+    }
+
+    #[test]
+    fn invalid_window() {
+        let data = get_test_data(4);
+        let windows = vec![];
+        let detrender = DetrendStrategy::Linear;
+        let result = DFAnalysis::dfa(&data, &windows, detrender);
+        assert!(result.is_err(), "DFA should fail with empty windows.");
+    }
+
+    #[test]
+    fn invalid_data_length() {
+        let data = get_test_data(3);
+        let windows = vec![4];
+        let detrender = DetrendStrategy::Linear;
+        let result = DFAnalysis::dfa(&data, &windows, detrender);
+        assert!(
+            result.is_err(),
+            "DFA should fail with less than 4x window size data."
+        );
+    }
+
+    #[test]
+    fn detrend_invalid_data() {
+        let data = get_test_data(1);
+        let result = LinearDetrend.detrend(&data);
+        assert!(
+            result.is_err(),
+            "Detrend should fail with less than 2 elements."
+        );
+    }
+
+    #[test]
+    fn custom_detrend() {
+        let mut detrender = MockDetrendAlgorithm::new();
+        detrender
+            .expect_detrend()
+            .times(1..)
+            .returning(|data| Ok(data.to_vec()));
+        let detrend_strategy = DetrendStrategy::Custom(Box::new(detrender));
+        let data = get_test_data(128);
+        let windows = vec![4, 5, 6];
+        let result = DFAnalysis::dfa(&data, &windows, detrend_strategy);
+        assert!(result.is_ok(), "DFA should succeed with custom detrender.");
+    }
 
     #[test]
     fn test_linear_fit() {
