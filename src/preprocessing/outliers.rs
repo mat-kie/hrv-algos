@@ -6,7 +6,21 @@ pub trait OutlierClassifier {
     fn add_data(&mut self, data: &[f64]) -> Result<()>;
     fn get_data(&self) -> &[f64];
     fn get_classification(&self) -> &[OutlierType];
-    fn get_filtered_data(&self) -> Vec<f64>;
+    fn get_filtered_data(&self) -> Vec<f64> {
+        self.get_data()
+            .par_iter()
+            .zip(self.get_classification())
+            .filter_map(
+                |(&val, class)| {
+                    if class.is_outlier() {
+                        None
+                    } else {
+                        Some(val)
+                    }
+                },
+            )
+            .collect()
+    }
 }
 
 /// Interface for outlier detection criteria used with moving window filters.
@@ -263,21 +277,6 @@ impl OutlierClassifier for MovingWindowFilter {
     }
     fn get_classification(&self) -> &[OutlierType] {
         &self.rr_classification
-    }
-    fn get_filtered_data(&self) -> Vec<f64> {
-        self.rr_intervals
-            .par_iter()
-            .zip(&self.rr_classification)
-            .filter_map(
-                |(&val, class)| {
-                    if class.is_outlier() {
-                        None
-                    } else {
-                        Some(val)
-                    }
-                },
-            )
-            .collect()
     }
 }
 
@@ -606,22 +605,6 @@ impl OutlierClassifier for MovingQuantileFilter {
     fn get_classification(&self) -> &[OutlierType] {
         &self.rr_classification
     }
-
-    fn get_filtered_data(&self) -> Vec<f64> {
-        self.rr_intervals
-            .par_iter()
-            .zip(&self.rr_classification)
-            .filter_map(
-                |(&val, class)| {
-                    if class.is_outlier() {
-                        None
-                    } else {
-                        Some(val)
-                    }
-                },
-            )
-            .collect()
-    }
 }
 
 #[cfg(test)]
@@ -752,6 +735,8 @@ mod tests {
         let mut filter = MovingWindowFilter::new(Box::new(criterion), 4);
         assert!(filter.add_data(&signal).is_ok());
         let classes = filter.get_classification();
+        assert_eq!(filter.get_data().len(), filter.get_classification().len());
+        assert_eq!(signal.len(), filter.get_classification().len());
         classes.iter().for_each(|&outlier| {
             assert!(!outlier.is_outlier());
         });
@@ -763,6 +748,8 @@ mod tests {
         let criterion = StdDevCriterion { ratio: 2.0 };
         let mut filter = MovingWindowFilter::new(Box::new(criterion), 3);
         assert!(filter.add_data(&signal).is_ok());
+        assert_eq!(filter.get_data().len(), filter.get_classification().len());
+        assert_eq!(signal.len(), filter.get_classification().len());
         let classes = filter.get_classification();
         classes.iter().for_each(|&outlier| {
             assert!(!outlier.is_outlier());
@@ -775,12 +762,15 @@ mod tests {
         let criterion = ValueRatioCriterion { ratio: 0.2 };
         let mut filter = MovingWindowFilter::new(Box::new(criterion), 5);
         assert!(filter.add_data(&signal).is_err());
+        
     }
     #[test]
     fn test_linear_interpolation() {
         let window = vec![1.0, 2.0, 3.0];
         let interpolator = LinearInterpolation;
         assert_eq!(interpolator.interpolate(&window, 1).unwrap(), 2.0);
+        assert_eq!(interpolator.interpolate(&window, 0).unwrap(), 1.0);
+        assert_eq!(interpolator.interpolate(&window, 2).unwrap(), 3.0);
     }
 
     #[test]
@@ -790,6 +780,12 @@ mod tests {
         assert!(interpolation.interpolate(&window, 5).is_err());
     }
 
+    #[test]
+    fn test_linear_interpolation_window_too_small() {
+        let window = vec![1.0, 1.1];
+        let interpolation = LinearInterpolation;
+        assert!(interpolation.interpolate(&window, 0).is_err());
+    }
     #[test]
     fn test_moving_quantile_filter() {
         let signal = vec![
