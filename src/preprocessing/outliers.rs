@@ -2,10 +2,42 @@ use anyhow::{anyhow, Result};
 use nalgebra::{DVector, DVectorView};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 
+/// Trait for outlier detection classifiers.
+///
+/// Outlier classifiers are used to detect, classify and filter outliers in a time series.
 pub trait OutlierClassifier {
+    /// Adds a slice of data to the classifier for outlier detection.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - A slice of f64 values to add to the classifier.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` indicating success or failure of data (re-) classification.
     fn add_data(&mut self, data: &[f64]) -> Result<()>;
+
+    /// Access to the classified time-series data.
+    ///
+    /// # Returns
+    ///
+    /// A slice of f64 values representing the data that was classified.
     fn get_data(&self) -> &[f64];
+
+    /// Access to the classification of the time-series data.
+    ///
+    /// # Returns
+    ///
+    /// A slice of `OutlierType` values representing the classification of the data.
+    /// The slice has the same length as the data slice.
     fn get_classification(&self) -> &[OutlierType];
+
+    /// Returns the filtered data without any outliers.
+    ///
+    /// # Returns
+    ///
+    /// A vector of f64 values representing the data without any outliers.
+    /// The data is filtered based on the classification of the time-series data.
     fn get_filtered_data(&self) -> Vec<f64> {
         self.get_data()
             .par_iter()
