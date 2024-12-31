@@ -361,6 +361,10 @@ fn rolling_quantile(signal: &[f64], window_size: usize, quantile: f64) -> Result
 /// # References
 ///
 ///  - Legrand, N. & Allen, M., (2022). Systole: A python package for cardiac signal synchrony and analysis. Journal of Open Source Software, 7(69), 3832, https://doi.org/10.21105/joss.03832
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone)]
 pub struct MovingQuantileFilter {
     rr_intervals: Vec<f64>,
     rr_classification: Vec<OutlierType>,
