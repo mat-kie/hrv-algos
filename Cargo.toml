@@ -1,6 +1,6 @@
 [package]
 name = "hrv-algos"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "A collection of algorithms for heart rate variability analysis."
 authors = ["Mattis Kieffer <crates-io@mk-io.de>"]
@@ -17,3 +17,6 @@ nalgebra = { version = "0.33.2", features = ["serde", "serde-serialize"] }
 rand = "0.8.5"
 rayon = "1.10.0"
 serde = { version = "1.0.130", features = ["derive"] , optional = true }
+
+[dev-dependencies]
+mockall = "0.7.0"

@@ -2,6 +2,59 @@ use anyhow::{anyhow, Result};
 use nalgebra::{DVector, DVectorView};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 
+/// Trait for outlier detection classifiers.
+///
+/// Outlier classifiers are used to detect, classify and filter outliers in a time series.
+pub trait OutlierClassifier {
+    /// Adds a slice of data to the classifier for outlier detection.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - A slice of f64 values to add to the classifier.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` indicating success or failure of data (re-) classification.
+    fn add_data(&mut self, data: &[f64]) -> Result<()>;
+
+    /// Access to the classified time-series data.
+    ///
+    /// # Returns
+    ///
+    /// A slice of f64 values representing the data that was classified.
+    fn get_data(&self) -> &[f64];
+
+    /// Access to the classification of the time-series data.
+    ///
+    /// # Returns
+    ///
+    /// A slice of `OutlierType` values representing the classification of the data.
+    /// The slice has the same length as the data slice.
+    fn get_classification(&self) -> &[OutlierType];
+
+    /// Returns the filtered data without any outliers.
+    ///
+    /// # Returns
+    ///
+    /// A vector of f64 values representing the data without any outliers.
+    /// The data is filtered based on the classification of the time-series data.
+    fn get_filtered_data(&self) -> Vec<f64> {
+        self.get_data()
+            .par_iter()
+            .zip(self.get_classification())
+            .filter_map(
+                |(&val, class)| {
+                    if class.is_outlier() {
+                        None
+                    } else {
+                        Some(val)
+                    }
+                },
+            )
+            .collect()
+    }
+}
+
 /// Interface for outlier detection criteria used with moving window filters.
 pub trait OutlierCriterion {
     /// Determines if a test value is acceptable based on a window of values.
@@ -93,7 +146,9 @@ impl OutlierCriterion for ValueRatioCriterion {
     fn is_acceptable(&self, testvalue: f64, window: &[f64]) -> bool {
         let data = DVectorView::from(window);
         let mean = data.mean();
-        testvalue >= mean * (1.0 - self.ratio) && testvalue <= mean * (1.0 + self.ratio)
+        let delta = (testvalue - mean).abs();
+        let limit = mean * self.ratio;
+        delta <= limit
     }
 }
 
@@ -195,64 +250,68 @@ impl Interpolator for LinearInterpolation {
     }
 }
 
-/// Moving window filter for outlier detection.
-///
-/// The filter processes a signal using a moving window and an outlier detection criterion.
-///
-/// # Arguments
-///
-/// * `signal` - The input signal to process.
-/// * `window_size` - The size of the moving window.
-/// * `criterion` - The outlier detection criterion.
-///
-/// # Returns
-///
-/// A vector of `OutlierType` values indicating the presence of outliers.
-///
-/// # Errors
-///
-/// Returns an error if the window size is greater than the signal length.
-///
-/// # Examples
-///
-/// ```
-/// use hrv_algos::preprocessing::outliers::{moving_window_filter, ValueRatioCriterion};
-/// let signal = vec![1.0, 1.1, 1.2, 5.0, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9];
-/// let criterion = ValueRatioCriterion { ratio: 0.5 };
-/// let filtered_signal = moving_window_filter(&signal, 5, criterion).unwrap();
-/// assert!(filtered_signal[3].is_outlier());
-/// ```
-pub fn moving_window_filter(
-    signal: &[f64],
+pub struct MovingWindowFilter {
+    rr_intervals: Vec<f64>,
+    rr_classification: Vec<OutlierType>,
+    criterion: Box<dyn OutlierCriterion>,
     window_size: usize,
-    criterion: impl OutlierCriterion,
-) -> Result<Vec<OutlierType>> {
-    if signal.len() < window_size {
-        return Err(anyhow::anyhow!(
-            "Window size must be less than the signal length."
-        ));
+}
+
+impl MovingWindowFilter {
+    pub fn new(criterion: Box<dyn OutlierCriterion>, window_size: usize) -> Self {
+        Self {
+            rr_intervals: Vec::new(),
+            rr_classification: Vec::new(),
+            criterion,
+            window_size: window_size.max(1),
+        }
     }
-    let half_window = window_size / 2;
-    let siglen = signal.len();
-    Ok((0..signal.len())
-        .map(|idx| {
-            let (window, _window_idx) = if idx < half_window {
-                (&signal[0..window_size], idx)
-            } else if idx >= siglen - half_window {
-                (
-                    &signal[siglen - window_size..siglen],
-                    window_size - (siglen - idx),
-                )
-            } else {
-                (&signal[idx - half_window..idx + half_window], half_window)
-            };
-            if criterion.is_acceptable(signal[idx], window) {
-                OutlierType::None
-            } else {
-                OutlierType::Other
-            }
-        })
-        .collect())
+
+    pub fn update_classification(&mut self) -> Result<()> {
+        if self.rr_intervals.len() < self.window_size {
+            return Err(anyhow::anyhow!(
+                "Window size must be less than the signal length."
+            ));
+        }
+        let half_window = self.window_size / 2;
+        let siglen = self.rr_intervals.len();
+        self.rr_classification = (0..self.rr_intervals.len())
+            .map(|idx| {
+                let (window, _window_idx) = if idx < half_window {
+                    (&self.rr_intervals[0..self.window_size], idx)
+                } else if idx >= siglen - half_window {
+                    (
+                        &self.rr_intervals[siglen - self.window_size..siglen],
+                        self.window_size - (siglen - idx),
+                    )
+                } else {
+                    (
+                        &self.rr_intervals[idx - half_window..idx + half_window],
+                        half_window,
+                    )
+                };
+                if self.criterion.is_acceptable(self.rr_intervals[idx], window) {
+                    OutlierType::None
+                } else {
+                    OutlierType::Other
+                }
+            })
+            .collect();
+        Ok(())
+    }
+}
+
+impl OutlierClassifier for MovingWindowFilter {
+    fn add_data(&mut self, data: &[f64]) -> Result<()> {
+        self.rr_intervals.extend_from_slice(data);
+        self.update_classification()
+    }
+    fn get_data(&self) -> &[f64] {
+        &self.rr_intervals
+    }
+    fn get_classification(&self) -> &[OutlierType] {
+        &self.rr_classification
+    }
 }
 
 /// Computes a rolling quantile over a 1D time series.
@@ -293,170 +352,330 @@ fn rolling_quantile(signal: &[f64], window_size: usize, quantile: f64) -> Result
         .collect()
 }
 
-/// Calculates the threshold for RR interval artefact detection.
-///
-/// The threshold is calculated as the difference between the 75th and 25th percentiles
-/// of the RR interval series.
-///
-/// # Arguments
-///
-/// * `signal` - Slice of RR intervals in milliseconds.
-/// * `quantile_scale` - Scaling factor for threshold calculations.
-fn calc_rr_threshold(signal: &[f64], quantile_scale: f64) -> Result<DVector<f64>> {
-    let first_quantile: DVector<f64> = rolling_quantile(signal, 91, 0.25)?.into();
-    let third_quantile: DVector<f64> = rolling_quantile(signal, 91, 0.75)?.into();
-    let threshold = (third_quantile - first_quantile) * (quantile_scale / 2.0);
-    Ok(threshold)
-}
-
 /// Detects artefacts (ectopic, long, short, missed, extra beats) in an RR interval series
 /// using rolling quantiles and threshold-based classification.
 ///
 /// The algorithm is based on the Systole Python package by Legrand and Allen (2022).
 /// Link: https://github.com/embodied-computation-group/systole
 ///
-/// # Arguments
-///
-/// * `rr` - Slice of consecutive RR intervals (in milliseconds).
-/// * `slope` - Optional slope control parameter for threshold lines.
-/// * `intersect` - Optional intercept control parameter for threshold lines.
-/// * `quantile_scale` - Optional scaling factor for threshold calculations.
-///
-/// # Returns
-///
-/// A `Result` containing a vector of tuples `(rr_value, is_artefact)` for each RR interval.
-///
-/// # Errors
-///
-/// Returns an error if `rr` has fewer than 2 elements.
-///
-/// # Example
-///
-/// ```
-/// use hrv_algos::preprocessing::outliers::classify_rr_values;
-/// let rr = vec![800.0, 805.0, 790.0];
-/// let result = classify_rr_values(&rr, None, None, None).unwrap();
-/// for (val, is_artefact) in rr.iter().zip(&result) {
-///     println!("{} -> {:?}", val, is_artefact);
-/// }
-/// ```
-///
 /// # References
 ///
 ///  - Legrand, N. & Allen, M., (2022). Systole: A python package for cardiac signal synchrony and analysis. Journal of Open Source Software, 7(69), 3832, https://doi.org/10.21105/joss.03832
-pub fn classify_rr_values(
-    rr: &[f64],
-    slope: Option<f64>,
-    intercept: Option<f64>,
-    quantile_scale: Option<f64>,
-) -> Result<Vec<OutlierType>> {
-    if rr.len() < 2 {
-        return Err(anyhow!("RR intervals must have at least 2 elements"));
+pub struct MovingQuantileFilter {
+    rr_intervals: Vec<f64>,
+    rr_classification: Vec<OutlierType>,
+    slope: f64,
+    intercept: f64,
+    quantile_scale: f64,
+    median_window: usize,
+    threshold_window: usize,
+}
+
+impl MovingQuantileFilter {
+    /// Creates a new `MovingQuantileFilter` instance.
+    /// The default values for slope, intercept, and quantile scale are 0.13, 0.17, and 5.2, respectively.
+    /// The default window sizes for median and threshold calculations are 11 and 91, respectively.
+    ///
+    /// # Arguments
+    ///
+    /// * `slope` - The slope value for the threshold calculation. Default is 0.13.
+    /// * `intercept` - The intercept value for the threshold calculation. Default is 0.17.
+    /// * `quantile_scale` - The scaling factor for the threshold calculation. Default is 5.2.
+    ///
+    /// # Returns
+    ///
+    /// A new `MovingQuantileFilter` instance.
+    ///
+    pub fn new(slope: Option<f64>, intercept: Option<f64>, quantile_scale: Option<f64>) -> Self {
+        Self {
+            rr_intervals: Vec::new(),
+            rr_classification: Vec::new(),
+            slope: slope.unwrap_or(0.13),
+            intercept: intercept.unwrap_or(0.17),
+            quantile_scale: quantile_scale.unwrap_or(5.2),
+            median_window: 11,
+            threshold_window: 91,
+        }
     }
-    let slope = slope.unwrap_or(0.13);
-    let intersect = intercept.unwrap_or(0.17);
-    let quantile_scale = quantile_scale.unwrap_or(5.2);
 
-    let drr = {
-        let drr: DVector<f64> =
-            DVector::from_iterator(rr.len() - 1, rr.windows(2).map(|w| w[1] - w[0]));
-        let mean_drr = drr.mean();
-        drr.insert_row(0, mean_drr)
-    };
+    /// Sets the slope value for the threshold comparison.
+    ///
+    /// # Arguments
+    ///
+    /// * `slope` - The slope value for the threshold calculation.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` indicating success or failure of reclassification.
+    pub fn set_slope(&mut self, slope: f64) -> Result<()> {
+        self.slope = slope;
+        self.rr_classification.clear();
+        self.update_classification()
+    }
 
-    // Rolling quantile calculations (q1 and q3)
-    let first_threshold = calc_rr_threshold(drr.as_slice(), quantile_scale)?;
-    // Calculate median RR (mRR)
-    let med_rr = DVector::from(rolling_quantile(rr, 11, 0.5)?);
-    let med_rr_deviation: DVector<f64> = DVector::from_iterator(
-        rr.len(),
-        rr.iter().zip(med_rr.iter()).map(|(&rr, &med)| {
-            let val = rr - med;
-            if val < 0.0 {
-                val * 2.0
-            } else {
-                val
-            }
-        }),
-    );
+    /// Sets the intercept value for the threshold comparison.
+    ///
+    /// # Arguments
+    ///
+    /// * `intercept` - The intercept value for the threshold calculation.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` indicating success or failure of reclassification.
+    pub fn set_intercept(&mut self, intercept: f64) -> Result<()> {
+        self.intercept = intercept;
+        self.rr_classification.clear();
+        self.update_classification()
+    }
 
-    // Calculate second threshold (th2)
-    let second_threshold = calc_rr_threshold(med_rr_deviation.as_slice(), quantile_scale)?;
+    /// Sets the quantile scale value for the threshold comparison.
+    ///
+    /// # Arguments
+    ///
+    /// * `quantile_scale` - The scaling factor for the threshold calculation.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` indicating success or failure of reclassification.
+    pub fn set_quantile_scale(&mut self, quantile_scale: f64) -> Result<()> {
+        self.quantile_scale = quantile_scale;
+        self.rr_classification.clear();
+        self.update_classification()
+    }
 
-    let normalized_mrr: DVector<f64> = med_rr_deviation.component_div(&second_threshold);
+    pub fn get_slope(&self) -> f64 {
+        self.slope
+    }
 
-    // Decision
-    let mean_rr = rr.iter().copied().sum::<f64>() / rr.len() as f64;
-    let result = rr
-        .par_iter()
-        .enumerate()
-        .map(|(idx, &rr_val)| {
-            let drr_val = drr[idx];
-            let nmrr = normalized_mrr[idx];
-            let th1_val = first_threshold[idx];
-            let th2_val = second_threshold[idx];
+    pub fn get_intercept(&self) -> f64 {
+        self.intercept
+    }
+    pub fn get_quantile_scale(&self) -> f64 {
+        self.quantile_scale
+    }
 
-            let s11 = drr_val / th1_val;
+    fn update_classification(&mut self) -> Result<()> {
+        // classification uses a 91 item rolling quantile
+        // take 91 last rr, update the last 46 elements classification
+        let win_start = self
+            .rr_classification
+            .len()
+            .saturating_sub(self.threshold_window);
+        let cutoff = self
+            .rr_classification
+            .len()
+            .saturating_sub(self.threshold_window / 2);
+        let added_rr = self
+            .rr_intervals
+            .len()
+            .saturating_sub(self.rr_classification.len());
+        let data = &self.rr_intervals[win_start..];
+        if data.is_empty() {
+            return Ok(());
+        }
+        let new_class = if data.len() == 1 {
+            vec![OutlierType::None]
+        } else {
+            self.classify_rr_values(data)?
+        };
 
-            let s12 = if idx == 0 || idx == rr.len() - 1 {
-                0.0
-            } else {
-                let ma = drr[idx - 1].max(drr[idx + 1]);
-                let mi = drr[idx - 1].min(drr[idx + 1]);
-                if drr_val < 0.0 {
-                    mi
+        let mut added_classes = new_class[new_class.len().saturating_sub(added_rr)..].to_vec();
+        self.rr_classification.append(&mut added_classes);
+        let to_update = self.rr_classification.len().saturating_sub(cutoff);
+        let new_class_skip = new_class.len().saturating_sub(to_update);
+        //  update the last 46 elements classification
+        for (a, b) in self
+            .rr_classification
+            .iter_mut()
+            .skip(cutoff)
+            .zip(new_class.iter().skip(new_class_skip))
+        {
+            *a = *b;
+        }
+        Ok(())
+    }
+
+    /// Calculates the threshold for RR interval artefact detection.
+    ///
+    /// The threshold is calculated as the difference between the 75th and 25th percentiles
+    /// of the RR interval series.
+    ///
+    /// # Arguments
+    ///
+    /// * `signal` - Slice of RR intervals in milliseconds.
+    /// * `quantile_scale` - Scaling factor for threshold calculations.
+    fn calc_rr_threshold(&self, signal: &[f64]) -> Result<DVector<f64>> {
+        let first_quantile: DVector<f64> =
+            rolling_quantile(signal, self.threshold_window, 0.25)?.into();
+        let third_quantile: DVector<f64> =
+            rolling_quantile(signal, self.threshold_window, 0.75)?.into();
+        let threshold = (third_quantile - first_quantile) * (self.quantile_scale / 2.0);
+        Ok(threshold)
+    }
+
+    /// Classifies RR intervals as ectopic, long, short, missed, or extra beats.
+    ///
+    /// The classification is based on the RR interval series and the calculated thresholds.
+    ///
+    /// # Arguments
+    ///
+    /// * `rr` - Slice of RR intervals in milliseconds.
+    ///
+    /// # Returns
+    ///
+    /// A vector of `OutlierType` values indicating the presence of outliers.
+    fn classify_rr_values(&self, rr: &[f64]) -> Result<Vec<OutlierType>> {
+        if rr.len() < 2 {
+            return Err(anyhow!("RR intervals must have at least 2 elements"));
+        }
+
+        let drr = {
+            let drr: DVector<f64> =
+                DVector::from_iterator(rr.len() - 1, rr.windows(2).map(|w| w[1] - w[0]));
+            let mean_drr = drr.mean();
+            drr.insert_row(0, mean_drr)
+        };
+
+        // Rolling quantile calculations (q1 and q3)
+        let first_threshold = self.calc_rr_threshold(drr.as_slice())?;
+        // Calculate median RR (mRR)
+        let med_rr = DVector::from(rolling_quantile(rr, self.median_window, 0.5)?);
+        let med_rr_deviation: DVector<f64> = DVector::from_iterator(
+            rr.len(),
+            rr.iter().zip(med_rr.iter()).map(|(&rr, &med)| {
+                let val = rr - med;
+                if val < 0.0 {
+                    val * 2.0
                 } else {
-                    ma
+                    val
                 }
-            };
+            }),
+        );
 
-            let s22 = if idx >= rr.len() - 2 {
-                0.0
-            } else {
-                let ma = drr[idx + 1].max(drr[idx + 2]);
-                let mi = drr[idx + 1].min(drr[idx + 2]);
-                if drr_val >= 0.0 {
-                    mi
+        // Calculate second threshold (th2)
+        let second_threshold = self.calc_rr_threshold(med_rr_deviation.as_slice())?;
+
+        let normalized_mrr: DVector<f64> = med_rr_deviation.component_div(&second_threshold);
+
+        // Decision
+        let mean_rr = rr.iter().copied().sum::<f64>() / rr.len() as f64;
+        let result = rr
+            .par_iter()
+            .enumerate()
+            .map(|(idx, &rr_val)| {
+                let drr_val = drr[idx];
+                let nmrr = normalized_mrr[idx];
+                let th1_val = first_threshold[idx];
+                let th2_val = second_threshold[idx];
+
+                let s11 = drr_val / th1_val;
+
+                let s12 = if idx == 0 || idx == rr.len() - 1 {
+                    0.0
                 } else {
-                    ma
+                    let ma = drr[idx - 1].max(drr[idx + 1]);
+                    let mi = drr[idx - 1].min(drr[idx + 1]);
+                    if drr_val < 0.0 {
+                        mi
+                    } else {
+                        ma
+                    }
+                };
+
+                let s22 = if idx >= rr.len() - 2 {
+                    0.0
+                } else {
+                    let ma = drr[idx + 1].max(drr[idx + 2]);
+                    let mi = drr[idx + 1].min(drr[idx + 2]);
+                    if drr_val >= 0.0 {
+                        mi
+                    } else {
+                        ma
+                    }
+                };
+
+                let ectopic = (s11 > 1.0 && s12 < (-self.slope * s11 - self.intercept))
+                    || (s11 < -1.0 && s12 > (-self.slope * s11 + self.intercept));
+
+                if ectopic {
+                    return OutlierType::Ectopic;
                 }
-            };
+                let long = ((s11 > 1.0 && s22 < -1.0) || (nmrr.abs() > 3.0 && rr_val > mean_rr))
+                    && !ectopic;
 
-            let ectopic = (s11 > 1.0 && s12 < (-slope * s11 - intersect))
-                || (s11 < -1.0 && s12 > (-slope * s11 + intersect));
+                let short = ((s11 < -1.0 && s22 > 1.0) || (nmrr.abs() > 3.0 && rr_val <= mean_rr))
+                    && !ectopic;
 
-            if ectopic {
-                return OutlierType::Ectopic;
-            }
-            let long =
-                ((s11 > 1.0 && s22 < -1.0) || (nmrr.abs() > 3.0 && rr_val > mean_rr)) && !ectopic;
-            if long {
-                return OutlierType::Long;
-            }
-            let short =
-                ((s11 < -1.0 && s22 > 1.0) || (nmrr.abs() > 3.0 && rr_val <= mean_rr)) && !ectopic;
-            if short {
-                return OutlierType::Short;
-            }
-            let missed = long && ((rr_val / 2.0 - med_rr[idx]).abs() < th2_val);
-            if missed {
-                return OutlierType::Missed;
-            }
-            let extra =
-                short && ((rr_val + rr.get(idx + 1).unwrap_or(&0.0) - med_rr[idx]).abs() < th2_val);
-            if extra {
-                return OutlierType::Extra;
-            }
-            OutlierType::None
-        })
-        .collect();
+                let missed = long && ((rr_val / 2.0 - med_rr[idx]).abs() < th2_val);
+                if missed {
+                    return OutlierType::Missed;
+                }
+                if long {
+                    return OutlierType::Long;
+                }
+                let extra = short
+                    && ((rr_val + rr.get(idx + 1).unwrap_or(&0.0) - med_rr[idx]).abs() < th2_val);
+                if extra {
+                    return OutlierType::Extra;
+                }
+                if short {
+                    return OutlierType::Short;
+                }
+                OutlierType::None
+            })
+            .collect();
 
-    Ok(result)
+        Ok(result)
+    }
+}
+
+impl OutlierClassifier for MovingQuantileFilter {
+    fn add_data(&mut self, data: &[f64]) -> Result<()> {
+        self.rr_intervals.extend_from_slice(data);
+        self.update_classification()
+    }
+
+    fn get_data(&self) -> &[f64] {
+        &self.rr_intervals
+    }
+
+    fn get_classification(&self) -> &[OutlierType] {
+        &self.rr_classification
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use rand::{Rng, SeedableRng};
+
     use super::*;
+
+    /// Generates a random signal with a given length.
+    /// the signal is generated using a fixed seed for reproducibility.
+    /// The signal is pseudorandom within 990 and 1010.
+    ///
+    /// # Arguments
+    ///
+    /// * `len` - The length of the signal to generate.
+    ///
+    /// # Returns
+    ///
+    /// A vector of f64 values representing the generated signal.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use hrv_algos::preprocessing::outliers::get_signal;
+    /// let signal = get_signal(100);
+    /// assert_eq!(signal.len(), 100);
+    /// assert!(signal.iter().all(|&val| val > 990.0 && val < 1010.0));
+    /// ```
+    fn get_signal(len: usize) -> Vec<f64> {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        (0..len)
+            .map(|_| 1000.0 + rng.gen_range(-10.0..10.0))
+            .collect()
+    }
 
     #[test]
     fn test_interpolation_method_enum() {
@@ -472,7 +691,7 @@ mod tests {
     #[test]
     fn test_symmetric_limits_acceptable() {
         let criterion = SymmetricLimitsCriterion { limit: 0.2 };
-        let window = vec![1.0, 1.1, 0.9, 1.0, 1.0];
+        let window = vec![1.0, 1.1, 0.9, 1.1, 0.9];
         assert!(criterion.is_acceptable(1.15, &window));
         assert!(!criterion.is_acceptable(1.3, &window));
     }
@@ -483,126 +702,290 @@ mod tests {
             lower: 0.8,
             upper: 1.2,
         };
-        let window = vec![1.0, 1.1, 0.9, 1.0, 1.0];
+        let window = vec![1.0, 1.1, 0.9, 1.1, 0.9];
         assert!(criterion.is_acceptable(1.1, &window));
         assert!(!criterion.is_acceptable(1.3, &window));
     }
-
-    #[test]
-    fn test_moving_window_filter_with_symmetric_limits() {
-        let signal = vec![1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9];
-        let criterion = SymmetricLimitsCriterion { limit: 0.2 };
-        let classes = moving_window_filter(&signal, 3, criterion).unwrap();
-        classes.iter().for_each(|&outlier| {
-            assert!(!outlier.is_outlier());
-        });
-    }
-
-    #[test]
-    fn test_moving_window_filter_with_limits() {
-        let signal = vec![1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9];
-        let criterion = LimitsCriterion {
-            lower: 1.0,
-            upper: 2.0,
-        };
-        let classes = moving_window_filter(&signal, 3, criterion).unwrap();
-        classes.iter().for_each(|&outlier| {
-            assert!(!outlier.is_outlier());
-        });
-    }
-
-    #[test]
-    fn test_moving_window_filter_with_outliers() {
-        let signal = vec![1.0, 1.1, 1.2, 5.0, 0.5, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9];
-        let criterion = ValueRatioCriterion { ratio: 0.5 };
-        let classes = moving_window_filter(&signal, 5, criterion).unwrap();
-        for (idx, class) in classes.iter().enumerate() {
-            if idx != 3 && idx != 4 {
-                assert!(!class.is_outlier());
-            } else {
-                assert!(class.is_outlier());
-            }
-        }
-    }
-
-    #[test]
-    fn test_rr_outliers() {
-        let signal = vec![
-            1000.0, 1100.0, 1.150e3, 1.50e3, 0.5e3, 1.12e3, 1.15e3, 1.16e3, 1.07e3, 1.08e3, 1.09e3,
-        ];
-        let result = classify_rr_values(&signal, None, None, None).unwrap();
-        assert_eq!(
-            result,
-            vec![
-                OutlierType::None,
-                OutlierType::None,
-                OutlierType::None,
-                OutlierType::Long,
-                OutlierType::Ectopic,
-                OutlierType::None,
-                OutlierType::None,
-                OutlierType::None,
-                OutlierType::None,
-                OutlierType::None,
-                OutlierType::None,
-            ]
-        );
-    }
-
     #[test]
     fn test_value_ratio_acceptable() {
-        let criterion = ValueRatioCriterion { ratio: 0.2 };
-        let window = vec![1.0, 1.1, 0.9, 1.0, 1.0];
-        assert!(criterion.is_acceptable(1.15, &window));
-        assert!(!criterion.is_acceptable(1.5, &window));
+        let criterion = ValueRatioCriterion { ratio: 0.01 };
+        let window = get_signal(5);
+        let mean = window.iter().sum::<f64>() / window.len() as f64;
+        let thr = mean * 0.01;
+        let eps = f64::EPSILON * 1e3;
+        assert!(criterion.is_acceptable(mean + thr - eps, &window));
+        assert!(criterion.is_acceptable(mean - thr + eps, &window));
+        assert!(!criterion.is_acceptable(mean + thr + eps, &window));
+        assert!(!criterion.is_acceptable(mean - thr - eps, &window));
     }
 
     #[test]
     fn test_std_dev_acceptable() {
         let criterion = StdDevCriterion { ratio: 2.0 };
-        let window = vec![0.9, 1.1, 0.9, 1.1, 1.0];
-        assert!(criterion.is_acceptable(1.15, &window));
-        assert!(!criterion.is_acceptable(1.5, &window));
+        let window = get_signal(5);
+        let data = DVectorView::from(window.as_slice());
+        let mean = data.mean();
+        let std_dev = data.variance().sqrt();
+        let eps = f64::EPSILON * 1e3;
+        assert!(criterion.is_acceptable(mean + 2.0 * std_dev - eps, &window));
+        assert!(criterion.is_acceptable(mean - 2.0 * std_dev + eps, &window));
+        assert!(!criterion.is_acceptable(mean - 2.0 * std_dev - eps, &window));
+        assert!(!criterion.is_acceptable(mean + 2.0 * std_dev + eps, &window));
+    }
+    #[test]
+    fn test_moving_window_filter_with_symmetric_limits() {
+        let signal = get_signal(16);
+        let criterion = SymmetricLimitsCriterion { limit: 10. };
+        let mut filter = MovingWindowFilter::new(Box::new(criterion), 3);
+        assert!(filter.add_data(&signal).is_ok());
+        let classes = filter.get_classification();
+        assert!(classes.iter().all(|&outlier| !outlier.is_outlier()));
+    }
+
+    #[test]
+    fn test_moving_window_filter_with_limits() {
+        let signal = get_signal(16);
+        let criterion = LimitsCriterion {
+            lower: 990.0,
+            upper: 1010.0,
+        };
+        let mut filter = MovingWindowFilter::new(Box::new(criterion), 3);
+        assert!(filter.add_data(&signal).is_ok());
+        let classes = filter.get_classification();
+        assert!(classes.iter().all(|&outlier| !outlier.is_outlier()));
+    }
+
+    #[test]
+    fn test_moving_window_filter_with_outliers() {
+        let mut signal = get_signal(16);
+        let criterion = SymmetricLimitsCriterion { limit: 15. };
+        signal[3] = 980.0;
+        signal[4] = 1020.0;
+        let mut filter = MovingWindowFilter::new(Box::new(criterion), 5);
+        assert!(filter.add_data(&signal).is_ok());
+        let classes = filter.get_classification();
+        assert!(classes.iter().enumerate().all(|(idx, &outlier)| {
+            if idx == 3 || idx == 4 {
+                outlier.is_outlier()
+            } else {
+                !outlier.is_outlier()
+            }
+        }));
+    }
+
+    #[test]
+    fn test_rr_outliers() {
+        let mut signal = get_signal(128);
+        signal[50] = 1100.0;
+        let mut filter = MovingQuantileFilter::new(None, None, None);
+        assert!(filter.add_data(&signal).is_ok());
+        let classes = filter.get_classification();
+        assert!(classes.iter().enumerate().all(|(idx, &outlier)| {
+            if idx == 50 {
+                outlier.is_outlier()
+            } else {
+                !outlier.is_outlier()
+            }
+        }));
     }
 
     #[test]
     fn test_moving_window_filter_even() {
-        let signal = vec![1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9];
+        let signal = get_signal(16);
         let criterion = ValueRatioCriterion { ratio: 0.2 };
-        let classes = moving_window_filter(&signal, 4, criterion).unwrap();
-        classes.iter().for_each(|&outlier| {
-            assert!(!outlier.is_outlier());
-        });
+        let mut filter = MovingWindowFilter::new(Box::new(criterion), 4);
+        assert!(filter.add_data(&signal).is_ok());
+        let classes = filter.get_classification();
+        assert_eq!(filter.get_data().len(), classes.len());
+        assert_eq!(signal.len(), classes.len());
+        assert!(classes.iter().all(|&outlier| !outlier.is_outlier()));
     }
 
     #[test]
     fn test_moving_window_filter_with_std_dev() {
-        let signal = vec![1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9];
+        let signal = get_signal(16);
         let criterion = StdDevCriterion { ratio: 2.0 };
-        let classes = moving_window_filter(&signal, 3, criterion).unwrap();
-        classes.iter().for_each(|&outlier| {
-            assert!(!outlier.is_outlier());
-        });
+        let mut filter = MovingWindowFilter::new(Box::new(criterion), 3);
+        assert!(filter.add_data(&signal).is_ok());
+        let classes = filter.get_classification();
+        assert_eq!(filter.get_data().len(), classes.len());
+        assert_eq!(signal.len(), classes.len());
+        assert!(classes.iter().all(|&outlier| !outlier.is_outlier()));
     }
 
     #[test]
     fn test_moving_window_filter_with_small_window() {
-        let signal = vec![1.0, 1.1, 1.2];
+        let signal = get_signal(3);
         let criterion = ValueRatioCriterion { ratio: 0.2 };
-        let result = moving_window_filter(&signal, 5, criterion);
-        assert!(result.is_err());
+        let mut filter = MovingWindowFilter::new(Box::new(criterion), 5);
+        assert!(filter.add_data(&signal).is_err());
     }
     #[test]
     fn test_linear_interpolation() {
         let window = vec![1.0, 2.0, 3.0];
         let interpolator = LinearInterpolation;
         assert_eq!(interpolator.interpolate(&window, 1).unwrap(), 2.0);
+        assert_eq!(interpolator.interpolate(&window, 0).unwrap(), 1.0);
+        assert_eq!(interpolator.interpolate(&window, 2).unwrap(), 3.0);
     }
 
     #[test]
     fn test_linear_interpolation_out_of_bounds() {
-        let window = vec![1.0, 1.1, 1.2, 1.3, 1.4];
+        let window = get_signal(4);
         let interpolation = LinearInterpolation;
         assert!(interpolation.interpolate(&window, 5).is_err());
+    }
+
+    #[test]
+    fn test_linear_interpolation_window_too_small() {
+        let window = get_signal(2);
+        let interpolation = LinearInterpolation;
+        assert!(interpolation.interpolate(&window, 0).is_err());
+    }
+    #[test]
+    fn test_moving_quantile_filter() {
+        let signal = get_signal(128);
+        let mut filter = MovingQuantileFilter::new(None, None, None);
+        assert!(filter.add_data(&signal).is_ok());
+        let classification = filter.get_classification();
+        assert_eq!(classification.len(), signal.len());
+        assert_eq!(filter.get_data().len(), signal.len());
+        assert!(classification
+            .iter()
+            .all(|&outlier| { !outlier.is_outlier() }));
+    }
+
+    #[test]
+    fn test_moving_quantile_filter_set_intercept_inf() {
+        let signal = get_signal(128);
+        let mut filter = MovingQuantileFilter::new(None, None, None);
+        assert!(filter.add_data(&signal).is_ok());
+        assert_eq!(filter.get_classification().len(), filter.get_data().len());
+        assert!(filter
+            .get_classification()
+            .iter()
+            .all(|&outlier| { !outlier.is_outlier() }));
+        assert_eq!(filter.get_intercept(), 0.17);
+        assert!(filter.set_intercept(0.0).is_ok());
+        assert_eq!(filter.get_intercept(), 0.0);
+        assert_eq!(filter.get_classification().len(), filter.get_data().len());
+        assert_eq!(filter.get_slope(), 0.13);
+        assert!(filter.set_slope(0.0).is_ok());
+        assert_eq!(filter.get_slope(), 0.0);
+        assert_eq!(filter.get_classification().len(), filter.get_data().len());
+
+        assert_eq!(filter.get_quantile_scale(), 5.2);
+        assert!(filter.set_quantile_scale(0.0).is_ok());
+        assert_eq!(filter.get_quantile_scale(), 0.0);
+        assert_eq!(filter.get_classification().len(), filter.get_data().len());
+
+        assert!(filter
+            .get_classification()
+            .iter()
+            .take(filter.get_classification().len() - 1)
+            .any(|&outlier| { outlier.is_outlier() }));
+    }
+
+    #[test]
+    fn test_moving_quantile_filter_add_data() {
+        let signal: Vec<f64> = get_signal(1010);
+        let first_signal = &signal[0..1000];
+        let mut second_signal = signal[1000..].to_vec();
+        second_signal[5] = 1500.0;
+        let mut filter = MovingQuantileFilter::new(None, None, None);
+        assert!(filter.add_data(first_signal).is_ok());
+        assert_eq!(filter.get_classification().len(), filter.get_data().len());
+        assert!(filter
+            .get_classification()
+            .iter()
+            .all(|&outlier| { !outlier.is_outlier() }));
+        assert!(filter.add_data(&second_signal).is_ok());
+        assert_eq!(filter.get_classification().len(), filter.get_data().len());
+        assert!(filter
+            .get_classification()
+            .iter()
+            .take(filter.get_classification().len() - 56)
+            .all(|&outlier| { !outlier.is_outlier() }));
+        assert!(filter.get_classification()[1005].is_outlier());
+    }
+    #[test]
+    fn test_moving_quantile_filter_add_empty_data() {
+        let mut filter = MovingQuantileFilter::new(None, None, None);
+        assert!(filter.add_data(&[]).is_ok());
+        assert_eq!(filter.get_classification().len(), filter.get_data().len());
+        assert_eq!(filter.get_classification().len(), 0);
+    }
+    #[test]
+    fn test_moving_quantile_filter_add_single_data() {
+        let signal = get_signal(1);
+        let mut filter = MovingQuantileFilter::new(None, None, None);
+        assert!(filter.add_data(&signal).is_ok());
+        assert_eq!(filter.get_classification().len(), filter.get_data().len());
+        filter.get_classification().iter().for_each(|&outlier| {
+            assert!(!outlier.is_outlier());
+        });
+        assert!(filter.add_data(&[1000.0]).is_ok());
+        assert_eq!(filter.get_classification().len(), filter.get_data().len());
+        assert_eq!(filter.get_classification().len(), 2);
+        filter.get_classification().iter().for_each(|&outlier| {
+            assert!(!outlier.is_outlier());
+        });
+    }
+    #[test]
+    fn test_moving_quantile_filter_add_data_missed() {
+        let signal = get_signal(1010);
+        let mut new_data: Vec<f64> = signal[1000..].to_vec();
+        new_data[5] = 2000.0;
+        let signal = &signal[0..1000];
+        let mut filter = MovingQuantileFilter::new(None, None, None);
+        assert!(filter.add_data(signal).is_ok());
+        assert_eq!(filter.get_classification().len(), filter.get_data().len());
+        assert!(filter
+            .get_classification()
+            .iter()
+            .all(|&outlier| { !outlier.is_outlier() }));
+        assert!(filter.add_data(&new_data).is_ok());
+        assert_eq!(filter.get_classification().len(), filter.get_data().len());
+        assert!(filter
+            .get_classification()
+            .iter()
+            .take(signal.len())
+            .all(|&outlier| { !outlier.is_outlier() }));
+        assert!(filter.get_classification()[1005].is_outlier());
+        assert!(matches!(
+            filter.get_classification()[1005],
+            OutlierType::Missed
+        ));
+        let filtered = filter.get_filtered_data();
+        assert!(filtered.iter().all(|&val| (val - 1000.0).abs() <= 20.0));
+    }
+
+    #[test]
+    fn test_moving_quantile_filter_add_data_extra() {
+        let signal = get_signal(1010);
+        let mut new_data: Vec<f64> = signal[1000..].to_vec();
+        new_data[5] = 20.0;
+        let signal = &signal[0..1000];
+        let mut filter = MovingQuantileFilter::new(None, None, None);
+        assert!(filter.add_data(signal).is_ok());
+        assert_eq!(filter.get_classification().len(), filter.get_data().len());
+        assert!(filter
+            .get_classification()
+            .iter()
+            .all(|&outlier| { !outlier.is_outlier() }));
+        assert!(filter.add_data(&new_data).is_ok());
+        assert_eq!(filter.get_classification().len(), filter.get_data().len());
+        assert!(filter
+            .get_classification()
+            .iter()
+            .take(filter.get_classification().len() - 56)
+            .all(|&outlier| { !outlier.is_outlier() }));
+        assert!(filter.get_classification()[1005].is_outlier());
+        assert!(matches!(
+            filter.get_classification()[1005],
+            OutlierType::Extra
+        ));
+        let filtered = filter.get_filtered_data();
+        assert!(filtered.iter().all(|&val| (val - 1000.0).abs() <= 20.0));
     }
 }
