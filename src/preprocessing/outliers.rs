@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Result};
 use nalgebra::{DVector, DVectorView};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
 
 /// Trait for outlier detection classifiers.
 ///
@@ -84,8 +86,6 @@ pub trait Interpolator {
 /// Enum representing different types of outliers.
 ///
 /// Outliers can be classified as ectopic, long, short, missed, or extra beats.
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum OutlierType {
@@ -361,8 +361,6 @@ fn rolling_quantile(signal: &[f64], window_size: usize, quantile: f64) -> Result
 /// # References
 ///
 ///  - Legrand, N. & Allen, M., (2022). Systole: A python package for cardiac signal synchrony and analysis. Journal of Open Source Software, 7(69), 3832, https://doi.org/10.21105/joss.03832
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone)]
 pub struct MovingQuantileFilter {
